@@ -1,0 +1,16 @@
+description: |
+  Finds all modified files for a given commit and base-branch.
+  This will only work on master branches if your team uses only squash merges.
+
+parameters:
+  base-branch:
+    description: |
+      The base branch for the repo.
+    type: string
+    default: master
+steps:
+  - run:
+      name: Swissknife - Get Modified Files
+      environment:
+        BASE_BRANCH: << parameters.base-branch >>
+      command: << include(../scripts/modified-files.sh) >>

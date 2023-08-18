@@ -1,0 +1,202 @@
+version: 2.1
+
+parameters:
+  run-integration-tests:
+    type: boolean
+    default: false
+  dev-orb-version:
+    type: string
+    default: "dev:alpha"
+
+orbs:
+  orb-tools: circleci/orb-tools@9.2.1
+  swissknife: roopakv/swissknife@<<pipeline.parameters.dev-orb-version>>
+  cli: circleci/circleci-cli@0.1.8
+
+jobs:
+  # TODO remove after https://github.com/CircleCI-Public/orb-tools-orb/pull/95/files
+  pack:
+    executor: cli/default
+    working_directory: /home/circleci/orbs
+    steps:
+      - checkout
+      - run:
+          name: pack
+          command: |
+            circleci orb pack --skip-update-check src > orb.yml
+      - orb-tools/validate:
+          orb-path: orb.yml
+      - persist_to_workspace:
+          paths:
+            - orb.yml
+          root: .
+      - store_artifacts:
+          path: orb.yml
+
+  test_run_if_modified:
+    executor: orb-tools/ubuntu
+    working_directory: /home/circleci/orbs
+    steps:
+      - checkout
+      - swissknife/run_if_modified:
+          pattern: src
+          steps-to-run:
+            - run:
+                command: |
+                  echo "src was modified";
+                  exit 0;
+      - swissknife/run_if_modified:
+          pattern: neverexists
+          always-run-on-branch: roopakv/always_run
+          steps-to-run:
+            - run:
+                command: |
+                  echo "this will always in roopakv/always_run";
+                  exit 1;
+      - swissknife/run_if_modified:
+          pattern: neverexists
+          steps-to-run:
+            - run:
+                command: |
+                  echo "neverexists was modified";
+                  exit 1;
+
+  test_run_on_branch:
+    executor: orb-tools/ubuntu
+    working_directory: /home/circleci/orbs
+    steps:
+      - checkout
+      - swissknife/run_on_branch:
+          branch-pattern: $CIRCLE_BRANCH
+          steps-to-run:
+            - run:
+                command: |
+                  echo "will run on $CIRCLE_BRANCH";
+                  exit 0;
+      - swissknife/run_on_branch:
+          branch-pattern: neverexists
+          steps-to-run:
+            - run:
+                command: |
+                  echo "should not run on this branch";
+                  exit 1;
+
+  test_fail_if_dirty:
+    executor: orb-tools/ubuntu
+    working_directory: /home/circleci/orbs
+    steps:
+      - checkout
+      - swissknife/fail_if_dirty:
+          steps-to-run:
+            - run:
+                command: |
+                  echo "make nothing dirty";
+                  exit 0;
+      - swissknife/fail_if_dirty:
+          custom-error-message: Something is wrong, very very wrong
+          steps-to-run:
+            - swissknife/run_on_branch:
+                branch-pattern: roopakv
+                steps-to-run:
+                  - run:
+                      command: |
+                        circleci config pack src > LICENCE
+
+  test_trigger_pipeline:
+    executor: orb-tools/ubuntu
+    working_directory: /home/circleci/orbs
+    steps:
+      - checkout
+      - swissknife/trigger-pipeline:
+          install-skip-trigger: true
+      - run:
+          command: |
+            cat /tmp/swissknife/trigger_pipeline.sh
+
+            export PARAMS='{"a": "b"}'
+
+            /tmp/swissknife/trigger_pipeline.sh github roopakv orbs $CIRLE_BRANCH $PARAMS
+
+workflows:
+  lint-pack-validate-publish-dev:
+    unless: << pipeline.parameters.run-integration-tests >>
+    jobs:
+      - orb-tools/lint
+
+      - pack:
+          requires: [orb-tools/lint]
+
+      - orb-tools/publish-dev:
+          orb-name: roopakv/swissknife
+          requires: [pack]
+
+      - orb-tools/trigger-integration-tests-workflow:
+          name: trigger-integration-dev
+          requires: [orb-tools/publish-dev]
+
+  build:
+    jobs:
+      - test_run_if_modified
+      - test_run_on_branch
+      - test_fail_if_dirty
+      # - test_trigger_pipeline
+
+  integration_tests-prod_deploy:
+    jobs:
+      # triggered by non-master branch commits
+      - test_run_if_modified:
+          filters:
+            branches:
+              ignore:
+                - /.*/
+            tags:
+              only:
+                - /integration-.*/
+                - /master-.*/
+
+      # triggered by non-master branch commits
+      - test_run_on_branch:
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only:
+                - /integration-.*/
+                - /master-.*/
+
+       # triggered by non-master branch commits
+      - test_fail_if_dirty:
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only:
+                - /integration-.*/
+                - /master-.*/
+
+
+      - publish-approval:
+          type: approval
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /.*-release.*/
+
+      # patch, minor, or major publishing
+      - orb-tools/dev-promote-prod-from-git-tag:
+          name: promote orb
+          orb-name: roopakv/swissknife
+          add-pr-comment: false
+          requires:
+            - publish-approval
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /.*-release.*/
+
+executors:
+  nodeimg:
+    docker:
+      - image: circleci/node:stretch
